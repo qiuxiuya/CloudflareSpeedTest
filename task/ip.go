@@ -2,6 +2,7 @@ package task
 
 import (
 	"bufio"
+	"encoding/json"
 	"log"
 	"math/rand"
 	"net"
@@ -19,7 +20,31 @@ var (
 	// IPFile is the filename of IP Rangs
 	IPFile = defaultInputFile
 	IPText string
+	// MasscanFile is the filename of masscan JSON output
+	MasscanFile string
+	// TCPPortSet 标记用户是否显式指定了 -tp 参数
+	TCPPortSet = false
+	// IPPortMap 存储每个 IPAddr 指针对应的端口（masscan 模式下使用）
+	IPPortMap = make(map[*net.IPAddr]int)
 )
+
+// masscan JSON 输出的数据结构
+type masscanEntry struct {
+	IP    string `json:"ip"`
+	Ports []struct {
+		Port   int    `json:"port"`
+		Proto  string `json:"proto"`
+		Status string `json:"status"`
+	} `json:"ports"`
+}
+
+// GetPort 获取指定 IP 对应的端口，优先从 IPPortMap 中查找，找不到则返回全局 TCPPort
+func GetPort(ip *net.IPAddr) int {
+	if port, ok := IPPortMap[ip]; ok {
+		return port
+	}
+	return TCPPort
+}
 
 func InitRandSeed() {
 	rand.Seed(time.Now().UnixNano())
@@ -147,7 +172,94 @@ func (r *IPRanges) chooseIPv6() {
 	}
 }
 
+// loadMasscanJSON 从 masscan JSON 文件加载 IP 和端口数据
+func loadMasscanJSON() []*net.IPAddr {
+	file, err := os.ReadFile(MasscanFile)
+	if err != nil {
+		log.Fatalf("读取 masscan JSON 文件 [%s] 失败：%v", MasscanFile, err)
+	}
+
+	// masscan -oJ 输出的 JSON 可能末尾带有 "finished" 行，需要清理
+	content := strings.TrimSpace(string(file))
+	// 移除可能存在的结尾 "finished" 行（masscan -oJ 的标准输出格式）
+	if idx := strings.LastIndex(content, "\n{"); idx != -1 {
+		lastLine := strings.TrimSpace(content[idx:])
+		if strings.Contains(lastLine, "\"finished\"") {
+			content = strings.TrimSpace(content[:idx])
+		}
+	}
+	// 确保内容被 [] 包裹
+	if !strings.HasPrefix(content, "[") {
+		content = "[" + content + "]"
+	}
+	// 移除末尾多余的逗号（JSON 不允许 trailing comma）
+	content = strings.TrimRight(strings.TrimSpace(content), ",")
+	// 如果移除逗号后不是以 ] 结尾，补上
+	if !strings.HasSuffix(strings.TrimSpace(content), "]") {
+		content = content + "]"
+	}
+
+	var entries []masscanEntry
+	if err := json.Unmarshal([]byte(content), &entries); err != nil {
+		log.Fatalf("解析 masscan JSON 文件 [%s] 失败：%v", MasscanFile, err)
+	}
+
+	if TCPPortSet {
+		// 用户指定了 -tp 端口，对 IP 去重后使用全局端口
+		seen := make(map[string]bool)
+		ips := make([]*net.IPAddr, 0)
+		for _, entry := range entries {
+			ip := strings.TrimSpace(entry.IP)
+			if ip == "" || seen[ip] {
+				continue
+			}
+			seen[ip] = true
+			parsedIP := net.ParseIP(ip)
+			if parsedIP == nil {
+				log.Printf("[警告] 无法解析 IP: %s，跳过", ip)
+				continue
+			}
+			ips = append(ips, &net.IPAddr{IP: parsedIP})
+		}
+		return ips
+	}
+
+	// 未指定 -tp，使用 JSON 中每个 IP:端口 组合，同一 IP 不同端口视为不同测试目标
+	seen := make(map[string]bool) // 用 "ip:port" 去重
+	ips := make([]*net.IPAddr, 0)
+	for _, entry := range entries {
+		ip := strings.TrimSpace(entry.IP)
+		if ip == "" {
+			continue
+		}
+		parsedIP := net.ParseIP(ip)
+		if parsedIP == nil {
+			log.Printf("[警告] 无法解析 IP: %s，跳过", ip)
+			continue
+		}
+		for _, port := range entry.Ports {
+			key := ip + ":" + strconv.Itoa(port.Port)
+			if seen[key] {
+				continue // 跳过重复的 IP:端口 组合
+			}
+			seen[key] = true
+			// 每个 IP:端口 组合创建独立的 IPAddr 实例
+			targetIP := make(net.IP, len(parsedIP))
+			copy(targetIP, parsedIP)
+			ipAddr := &net.IPAddr{IP: targetIP}
+			IPPortMap[ipAddr] = port.Port // 通过指针地址映射端口
+			ips = append(ips, ipAddr)
+		}
+	}
+	return ips
+}
+
 func loadIPRanges() []*net.IPAddr {
+	// 优先处理 masscan JSON 文件
+	if MasscanFile != "" {
+		return loadMasscanJSON()
+	}
+
 	ranges := newIPRanges()
 	if IPText != "" { // 从参数中获取 IP 段数据
 		IPs := strings.Split(IPText, ",") // 以逗号分隔为数组并循环遍历

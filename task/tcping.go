@@ -63,10 +63,14 @@ func (p *Ping) Run() utils.PingDelaySet {
 	if len(p.ips) == 0 {
 		return p.csv
 	}
+	portInfo := strconv.Itoa(TCPPort)
+	if len(IPPortMap) > 0 {
+		portInfo = "多端口(Masscan)"
+	}
 	if Httping {
-		utils.Cyan.Printf("开始延迟测速（模式：HTTP, 端口：%d, 范围：%v ~ %v ms, 丢包：%.2f)\n", TCPPort, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
+		utils.Cyan.Printf("开始延迟测速（模式：HTTP, 端口：%s, 范围：%v ~ %v ms, 丢包：%.2f)\n", portInfo, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
 	} else {
-		utils.Cyan.Printf("开始延迟测速（模式：TCP, 端口：%d, 范围：%v ~ %v ms, 丢包：%.2f)\n", TCPPort, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
+		utils.Cyan.Printf("开始延迟测速（模式：TCP, 端口：%s, 范围：%v ~ %v ms, 丢包：%.2f)\n", portInfo, utils.InputMinDelay.Milliseconds(), utils.InputMaxDelay.Milliseconds(), utils.InputMaxLossRate)
 	}
 	for _, ip := range p.ips {
 		p.wg.Add(1)
@@ -88,11 +92,12 @@ func (p *Ping) start(ip *net.IPAddr) {
 // bool connectionSucceed float32 time
 func (p *Ping) tcping(ip *net.IPAddr) (bool, time.Duration) {
 	startTime := time.Now()
+	port := GetPort(ip)
 	var fullAddress string
 	if isIPv4(ip.String()) {
-		fullAddress = fmt.Sprintf("%s:%d", ip.String(), TCPPort)
+		fullAddress = fmt.Sprintf("%s:%d", ip.String(), port)
 	} else {
-		fullAddress = fmt.Sprintf("[%s]:%d", ip.String(), TCPPort)
+		fullAddress = fmt.Sprintf("[%s]:%d", ip.String(), port)
 	}
 	conn, err := net.DialTimeout("tcp", fullAddress, tcpConnectTimeout)
 	if err != nil {
@@ -140,6 +145,7 @@ func (p *Ping) tcpingHandler(ip *net.IPAddr) {
 	}
 	data := &utils.PingData{
 		IP:       ip,
+		Port:     GetPort(ip),
 		Sended:   PingTimes,
 		Received: recv,
 		Delay:    totalDlay / time.Duration(recv),
